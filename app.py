@@ -52,7 +52,7 @@ def save_to_db(data_tuple):
 
 # --- 3. AI EXTRACTION FUNCTION ---
 def extract_data_from_pdf(pdf_file):
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
     pdf_content = pdf_file.read()
     
     prompt = """
