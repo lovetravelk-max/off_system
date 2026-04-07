@@ -42,47 +42,63 @@ def get_master_data(table):
     finally:
         conn.close()
 
-# --- 3. THE "VISION" EXTRACTION ENGINE (Stable Version) ---
+# --- 3. THE "VISION" EXTRACTION ENGINE ---
 def extract_data(pdf_file):
-    # Try the most stable model names in order
-    model_names = ['gemini-1.5-flash', 'models/gemini-1.5-flash', 'gemini-pro']
+    # In 2026, 'gemini-1.5-flash' is the most stable global ID
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
+    # Reset file pointer and read bytes
+    pdf_file.seek(0)
     file_bytes = pdf_file.read()
     
     prompt = """
-    Return ONLY JSON:
+    Return ONLY a JSON object:
     {
-      "insurer": "Company Name",
-      "insured_name": "Full Client Name",
+      "insurer": "NAME",
+      "insured_name": "NAME",
       "premium": 0.0,
       "ia_levy": 0.0,
       "ec_levy": 0.0,
-      "address": "Full Correspondence Address"
+      "address": "ADDRESS"
     }
-    Scan the document for these insurance values. Use 0 for numbers if not found.
+    Extract these from the insurance policy. Use 0 for missing numbers.
     """
     
-    for name in model_names:
-        try:
-            model = genai.GenerativeModel(name)
-            response = model.generate_content([
-                prompt,
-                {"mime_type": "application/pdf", "data": file_bytes}
-            ])
-            
-            # Extract JSON from the response
-            res_text = response.text
-            start = res_text.find('{')
-            end = res_text.rfind('}') + 1
-            if start != -1 and end != -1:
-                return json.loads(res_text[start:end])
-        except Exception as e:
-            # If this model name fails, we loop to the next one
-            continue 
-            
-    st.error("AI Model not found on this server. Please check your requirements.txt")
-    return {}
+    try:
+        # Direct call to the model
+        response = model.generate_content([
+            prompt,
+            {"mime_type": "application/pdf", "data": file_bytes}
+        ])
+        
+        # Clean the text and find the JSON
+        res_text = response.text
+        start = res_text.find('{')
+        end = res_text.rfind('}') + 1
+        return json.loads(res_text[start:end])
+    except Exception as e:
+        st.error(f"AI Error: {str(e)}")
+        return None
 
+# --- 4. THE UI FIX (CRITICAL) ---
+with tab1:
+    uploaded_file = st.file_uploader("Upload Policy PDF", type="pdf")
+    
+    # Ensure session state exists
+    if "ai_data" not in st.session_state:
+        st.session_state.ai_data = {}
+
+    if uploaded_file:
+        if st.button("🔍 Run AI Scan"):
+            with st.spinner("AI is reading..."):
+                result = extract_data(uploaded_file)
+                if result:
+                    # Update the session state
+                    st.session_state.ai_data = result
+                    st.success("Data Pulled!")
+                    # Use st.rerun() to ensure the boxes update immediately
+                    st.rerun()
+                    
 # --- 4. MAIN INTERFACE ---
 st.title("🛡️ SME Insurance Management System")
 
