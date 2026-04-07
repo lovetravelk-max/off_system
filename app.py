@@ -42,19 +42,15 @@ def get_master_data(table):
     finally:
         conn.close()
 
-# --- 3. THE "VISION" EXTRACTION ENGINE ---
+# --- 3. THE "VISION" EXTRACTION ENGINE (Stable Version) ---
 def extract_data(pdf_file):
-    # Force use of 1.5-flash for OCR/Vision capabilities
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Try the most stable model names in order
+    model_names = ['gemini-1.5-flash', 'models/gemini-1.5-flash', 'gemini-pro']
     
-    # Read the file bytes
     file_bytes = pdf_file.read()
     
     prompt = """
-    Analyze this insurance document carefully. Extract the following values and return them in RAW JSON format. 
-    Look for keywords like 'Policyholder', 'Sum Payable', 'Levy', 'Insurer'.
-    
-    Return this exact JSON structure:
+    Return ONLY JSON:
     {
       "insurer": "Company Name",
       "insured_name": "Full Client Name",
@@ -63,28 +59,29 @@ def extract_data(pdf_file):
       "ec_levy": 0.0,
       "address": "Full Correspondence Address"
     }
-    
-    Note: If a value is missing, use 0 for numbers and "N/A" for text. Return ONLY JSON.
+    Scan the document for these insurance values. Use 0 for numbers if not found.
     """
     
-    try:
-        # We pass the bytes directly as a PDF blob
-        response = model.generate_content([
-            prompt,
-            {"mime_type": "application/pdf", "data": file_bytes}
-        ])
-        
-        # Robust JSON cleaning
-        res_text = response.text
-        # Find the first { and last }
-        start = res_text.find('{')
-        end = res_text.rfind('}') + 1
-        json_str = res_text[start:end]
-        
-        return json.loads(json_str)
-    except Exception as e:
-        st.error(f"AI Extraction Failed: {e}")
-        return {}
+    for name in model_names:
+        try:
+            model = genai.GenerativeModel(name)
+            response = model.generate_content([
+                prompt,
+                {"mime_type": "application/pdf", "data": file_bytes}
+            ])
+            
+            # Extract JSON from the response
+            res_text = response.text
+            start = res_text.find('{')
+            end = res_text.rfind('}') + 1
+            if start != -1 and end != -1:
+                return json.loads(res_text[start:end])
+        except Exception as e:
+            # If this model name fails, we loop to the next one
+            continue 
+            
+    st.error("AI Model not found on this server. Please check your requirements.txt")
+    return {}
 
 # --- 4. MAIN INTERFACE ---
 st.title("🛡️ SME Insurance Management System")
