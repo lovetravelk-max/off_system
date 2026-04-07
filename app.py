@@ -13,13 +13,12 @@ if "GOOGLE_API_KEY" in st.secrets:
 else:
     st.error("Missing API Key in Secrets!")
 
-# --- 2. DATABASE ENGINE (Extra Stable Version) ---
+# --- 2. DATABASE ENGINE ---
 DB_NAME = 'sme_insurance.db'
 
 def init_db():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     c = conn.cursor()
-    # Create all 4 tables immediately
     c.execute('''CREATE TABLE IF NOT EXISTS policies
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   client_id TEXT, agent_id TEXT, insurer_id TEXT,
@@ -31,35 +30,46 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Force initialization at the very start
 init_db()
 
-# Helper to fetch data safely
 def get_master_data(table):
     conn = sqlite3.connect(DB_NAME)
     try:
-        df = pd.read_sql_query(f"SELECT id, name FROM {table}", conn)
-        if df.empty:
-            return pd.DataFrame(columns=['id', 'name'])
-        return df
-    except Exception:
+        return pd.read_sql_query(f"SELECT id, name FROM {table}", conn)
+    except:
         return pd.DataFrame(columns=['id', 'name'])
     finally:
         conn.close()
 
-# --- 3. AI EXTRACTION ---
+# --- 3. UPDATED AI EXTRACTION (Fixed 404 Error) ---
 def extract_data(pdf_file):
+    # We use 'gemini-1.5-flash' without the 'models/' prefix to be safe
     model = genai.GenerativeModel('gemini-1.5-flash')
     pdf_content = pdf_file.read()
-    prompt = """Extract as JSON: "insurer", "insured_name", "class", "premium", "ia_levy", "ec_levy", "address". Use 0 for missing numbers."""
-    response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_content}])
-    clean_json = response.text.replace("```json", "").replace("```", "").strip()
-    return json.loads(clean_json)
+    
+    prompt = """
+    Extract as raw JSON only: 
+    {"insurer": "", "insured_name": "", "class": "", "premium": 0, "ia_levy": 0, "ec_levy": 0, "address": ""}
+    If a value is missing, use 0 for numbers or "N/A" for text.
+    """
+    
+    # Adding a try-except block here specifically for the AI call
+    try:
+        response = model.generate_content([
+            prompt, 
+            {"mime_type": "application/pdf", "data": pdf_content}
+        ])
+        # Clean the response text
+        res_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(res_text)
+    except Exception as e:
+        st.error(f"AI could not read this PDF automatically. Error: {e}")
+        return {}
 
 # --- 4. MAIN INTERFACE ---
 st.title("🛡️ SME Insurance Management System")
 
-# Refresh lists from DB
+# Refresh lists
 df_clients = get_master_data("clients")
 df_agents = get_master_data("agents")
 df_insurers = get_master_data("insurers")
@@ -71,8 +81,10 @@ with tab1:
     if "ai" not in st.session_state: st.session_state.ai = {}
 
     if uploaded_file and st.button("🔍 AI Scan Policy"):
-        with st.spinner("AI analyzing..."):
+        with st.spinner("Connecting to Google AI..."):
             st.session_state.ai = extract_data(uploaded_file)
+            if st.session_state.ai:
+                st.success("AI extraction successful!")
             st.rerun()
 
     st.divider()
@@ -118,7 +130,6 @@ with tab1:
 
     st.divider()
     
-    # MONEY LOGIC
     m1, m2 = st.columns(2)
     with m1:
         prem = st.number_input("Premium", value=float(st.session_state.ai.get("premium", 0)))
@@ -143,11 +154,9 @@ with tab1:
 
     if st.button("💾 Save Transaction"):
         conn = sqlite3.connect(DB_NAME)
-        # Save master data
         conn.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (c_id, c_name, c_addr))
         conn.execute("INSERT OR REPLACE INTO agents VALUES (?,?)", (a_id, a_name))
         conn.execute("INSERT OR REPLACE INTO insurers VALUES (?,?)", (i_id, i_name))
-        # Save policy
         conn.execute("INSERT INTO policies (client_id, agent_id, insurer_id, premium, ia_levy, ec_levy, agent_payout, co_profit, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                      (c_id, a_id, i_id, prem, ia, ec, f_a, f_c, datetime.now().strftime("%Y-%m-%d")))
         conn.commit()
@@ -157,9 +166,10 @@ with tab1:
 
 with tab2:
     st.subheader("📋 System Master Lists")
-    c1, c2 = st.columns(2)
-    with c1: st.write("**Clients**"); st.dataframe(get_master_data("clients"))
-    with c2: st.write("**Agents**"); st.dataframe(get_master_data("agents"))
+    cl1, cl2, cl3 = st.columns(3)
+    with cl1: st.write("**Clients**"); st.dataframe(df_clients)
+    with cl2: st.write("**Agents**"); st.dataframe(df_agents)
+    with cl3: st.write("**Insurers**"); st.dataframe(df_insurers)
 
 with tab3:
     st.subheader("📊 Accounting Report")
