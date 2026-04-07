@@ -10,11 +10,11 @@ st.set_page_config(page_title="SME Insurance System", layout="wide")
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# --- 2. DATABASE ENGINE (Added Agent & Insurer Tables) ---
+# --- 2. DATABASE ENGINE (Updated for Stability) ---
 def init_db():
     conn = sqlite3.connect('sme_insurance.db', check_same_thread=False)
     c = conn.cursor()
-    # Policies
+    # Policies Table
     c.execute('''CREATE TABLE IF NOT EXISTS policies
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   client_id TEXT, agent_id TEXT, insurer_id TEXT,
@@ -27,7 +27,21 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Run initialization immediately
 init_db()
+
+# --- 4. UI HELPER FUNCTIONS (Improved for Error Handling) ---
+def get_master_data(table):
+    conn = sqlite3.connect('sme_insurance.db')
+    try:
+        # We check if the table exists by running a quick query
+        df = pd.read_sql_query(f"SELECT id, name FROM {table}", conn)
+    except Exception:
+        # If the table isn't ready yet, return an empty version
+        df = pd.DataFrame(columns=['id', 'name'])
+    finally:
+        conn.close()
+    return df
 
 # --- 3. AI EXTRACTION ---
 def extract_data(pdf_file):
