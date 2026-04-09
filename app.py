@@ -6,13 +6,13 @@ from datetime import datetime
 import json
 import re
 
-# --- 1. CONFIG ---
+# --- 1. CONFIG & API SETUP ---
 st.set_page_config(page_title="SME Insurance System", layout="wide")
 
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 else:
-    st.error("Missing API Key in Secrets!")
+    st.error("Missing API Key! Please add GOOGLE_API_KEY to your Streamlit Secrets.")
 
 # --- 2. DATABASE ENGINE ---
 DB_NAME = 'sme_insurance.db'
@@ -20,11 +20,13 @@ DB_NAME = 'sme_insurance.db'
 def init_db():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     c = conn.cursor()
+    # Policies Table
     c.execute('''CREATE TABLE IF NOT EXISTS policies
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   client_id TEXT, agent_id TEXT, insurer_id TEXT,
                   premium REAL, ia_levy REAL, ec_levy REAL, 
-                  agent_payout REAL, co_profit REAL, created_at TEXT)''')
+                  created_at TEXT)''')
+    # Master Data Tables
     c.execute('CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, name TEXT, addr TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, name TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS insurers (id TEXT PRIMARY KEY, name TEXT)')
@@ -42,161 +44,163 @@ def get_master_data(table):
     finally:
         conn.close()
 
-# --- 3. THE "VISION" EXTRACTION ENGINE ---
+# --- 3. AI EXTRACTION ENGINE ---
 def extract_data(pdf_file):
-    # In 2026, 'gemini-1.5-flash' is the most stable global ID
     model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    # Reset file pointer and read bytes
     pdf_file.seek(0)
     file_bytes = pdf_file.read()
     
     prompt = """
-    Return ONLY a JSON object:
+    Analyze this insurance document. Extract the following and return ONLY raw JSON:
     {
-      "insurer": "NAME",
-      "insured_name": "NAME",
+      "insurer": "Company Name",
+      "insured_name": "Client Name",
       "premium": 0.0,
       "ia_levy": 0.0,
       "ec_levy": 0.0,
-      "address": "ADDRESS"
+      "address": "Correspondence Address"
     }
-    Extract these from the insurance policy. Use 0 for missing numbers.
+    Use 0 for missing numbers. No currency symbols.
     """
     
     try:
-        # Direct call to the model
         response = model.generate_content([
             prompt,
             {"mime_type": "application/pdf", "data": file_bytes}
         ])
-        
-        # Clean the text and find the JSON
-        res_text = response.text
-        start = res_text.find('{')
-        end = res_text.rfind('}') + 1
-        return json.loads(res_text[start:end])
+        # Find JSON block using Regex
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return {}
     except Exception as e:
-        st.error(f"AI Error: {str(e)}")
-        return None
+        st.error(f"AI Error: {e}")
+        return {}
 
-# --- 4. THE UI FIX (CRITICAL) ---
-with tab1:
-    uploaded_file = st.file_uploader("Upload Policy PDF", type="pdf")
-    
-    # Ensure session state exists
-    if "ai_data" not in st.session_state:
-        st.session_state.ai_data = {}
-
-    if uploaded_file:
-        if st.button("🔍 Run AI Scan"):
-            with st.spinner("AI is reading..."):
-                result = extract_data(uploaded_file)
-                if result:
-                    # Update the session state
-                    st.session_state.ai_data = result
-                    st.success("Data Pulled!")
-                    # Use st.rerun() to ensure the boxes update immediately
-                    st.rerun()
-                    
 # --- 4. MAIN INTERFACE ---
 st.title("🛡️ SME Insurance Management System")
 
-# Load Master Lists
+# Refresh database lists
 df_clients = get_master_data("clients")
 df_agents = get_master_data("agents")
 df_insurers = get_master_data("insurers")
 
-tab1, tab2, tab3 = st.tabs(["Create Debit Note", "Master Lists", "History"])
+# Initialize Session State for AI data
+if "ai_data" not in st.session_state:
+    st.session_state.ai_data = {
+        "insured_name": "", "insurer": "", "address": "",
+        "premium": 0.0, "ia_levy": 0.0, "ec_levy": 0.0
+    }
+
+tab1, tab2, tab3 = st.tabs(["🆕 Create Debit Note", "📋 Master Lists", "📊 Reports"])
 
 with tab1:
-    # Initialize the "Brain" of the form if it doesn't exist
-    if "ai_data" not in st.session_state:
-        st.session_state.ai_data = {}
-
+    # --- UPLOAD & SCAN ---
     uploaded_file = st.file_uploader("Upload Policy PDF", type="pdf")
     
     if uploaded_file:
         if st.button("🔍 Run AI Scan"):
-            with st.spinner("Analyzing document structure..."):
-                extracted = extract_data(uploaded_file)
-                if extracted:
-                    st.session_state.ai_data = extracted
-                    st.success("Data Pulled! Check the fields below.")
-                    st.rerun() # Force UI refresh to fill boxes
+            with st.spinner("AI is reading the policy..."):
+                result = extract_data(uploaded_file)
+                if result:
+                    st.session_state.ai_data.update(result)
+                    st.success("Data Pulled! Fields updated below.")
+                    st.rerun()
 
     st.divider()
     
-    # UI Layout using session_state to fill values
+    # --- DATA ENTRY & EDITING ---
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.subheader("👤 Client")
         c_list = ["+ ADD NEW"] + df_clients['id'].tolist()
-        c_sel = st.selectbox("Client Code", c_list)
+        c_sel = st.selectbox("Search Client Code", c_list)
         
         if c_sel == "+ ADD NEW":
-            c_id = st.text_input("New Client ID")
+            c_id = st.text_input("New Client ID (Manual)")
             c_name = st.text_input("Client Name", value=st.session_state.ai_data.get("insured_name", ""))
         else:
             c_id = c_sel
             c_name = df_clients[df_clients['id'] == c_id]['name'].values[0]
-        
+            st.info(f"Existing Client: {c_name}")
+            
         c_addr = st.text_area("Address", value=st.session_state.ai_data.get("address", ""))
 
     with col2:
         st.subheader("🤵 Agent")
         a_list = ["+ ADD NEW"] + df_agents['id'].tolist()
-        a_sel = st.selectbox("Agent Code", a_list)
-        a_id = st.text_input("New Agent ID") if a_sel == "+ ADD NEW" else a_sel
-        a_name = st.text_input("Agent Name") if a_sel == "+ ADD NEW" else df_agents[df_agents['id'] == a_id]['name'].values[0]
+        a_sel = st.selectbox("Search Agent Code", a_list)
+        if a_sel == "+ ADD NEW":
+            a_id = st.text_input("New Agent ID")
+            a_name = st.text_input("Agent Name")
+        else:
+            a_id = a_sel
+            a_name = df_agents[df_agents['id'] == a_id]['name'].values[0]
 
     with col3:
         st.subheader("🏢 Insurer")
         i_list = ["+ ADD NEW"] + df_insurers['id'].tolist()
-        i_sel = st.selectbox("Insurer Code", i_list)
-        i_id = st.text_input("New Insurer ID") if i_sel == "+ ADD NEW" else i_sel
-        i_name = st.text_input("Insurer Name", value=st.session_state.ai_data.get("insurer", "")) if i_sel == "+ ADD NEW" else df_insurers[df_insurers['id'] == i_id]['name'].values[0]
+        i_sel = st.selectbox("Search Insurer Code", i_list)
+        if i_sel == "+ ADD NEW":
+            i_id = st.text_input("New Insurer ID")
+            i_name = st.text_input("Insurer Name", value=st.session_state.ai_data.get("insurer", ""))
+        else:
+            i_id = i_sel
+            i_name = df_insurers[df_insurers['id'] == i_id]['name'].values[0]
 
     st.divider()
     
-    # Premium & Split logic
+    # --- PREMIUMS & CALCULATIONS ---
     m1, m2 = st.columns(2)
     with m1:
-        # Defaulting numbers to 0.0 if not found
-        prem = st.number_input("Premium", value=float(st.session_state.ai_data.get("premium", 0.0)))
-        ia = st.number_input("IA Levy", value=float(st.session_state.ai_data.get("ia_levy", 0.0)))
-        ec = st.number_input("EC Levy", value=float(st.session_state.ai_data.get("ec_levy", 0.0)))
-        st.info(f"Total Billable: ${prem + ia + ec:,.2f}")
-    
+        st.write("**Policy Amounts**")
+        final_prem = st.number_input("Premium", value=float(st.session_state.ai_data.get("premium", 0.0)))
+        final_ia = st.number_input("IA Levy", value=float(st.session_state.ai_data.get("ia_levy", 0.0)))
+        final_ec = st.number_input("EC Levy", value=float(st.session_state.ai_data.get("ec_levy", 0.0)))
+        total = final_prem + final_ia + final_ec
+        st.metric("Total to Client", f"${total:,.2f}")
+
     with m2:
-        rate = st.number_input("Comm %", value=15.0)
-        split = st.number_input("Agent Split %", value=60.0)
-        disc = st.number_input("Discount $", value=0.0)
-        mode = st.radio("Discount from:", ["Company", "Agent", "Proportional"])
+        st.write("**Internal Split**")
+        rate = st.number_input("Comm Rate %", value=15.0)
+        split = st.number_input("Agent Payout %", value=60.0)
+        
+        # Simple Logic check
+        total_comm = final_prem * (rate/100)
+        agent_amt = total_comm * (split/100)
+        st.write(f"Est. Agent Payout: **${agent_amt:,.2f}**")
 
-    # Basic Split Logic
-    total_comm = prem * (rate/100)
-    raw_a = total_comm * (split/100)
-    raw_c = total_comm - raw_a
-    
-    if mode == "Company": f_a, f_c = raw_a, raw_c - disc
-    elif mode == "Agent": f_a, f_c = raw_a - disc, raw_c
-    else: 
-        f_a = raw_a - (disc * (split/100))
-        f_c = raw_c - (disc * (1 - split/100))
+    # --- SAVE ACTION ---
+    if st.button("✅ Save & Update Database"):
+        if not c_id or not a_id or not i_id:
+            st.warning("Please ensure all Codes (Client, Agent, Insurer) are filled.")
+        else:
+            conn = sqlite3.connect(DB_NAME)
+            # Save Master Data
+            conn.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (c_id, c_name, c_addr))
+            conn.execute("INSERT OR REPLACE INTO agents VALUES (?,?)", (a_id, a_name))
+            conn.execute("INSERT OR REPLACE INTO insurers VALUES (?,?)", (i_id, i_name))
+            # Save Policy
+            conn.execute('''INSERT INTO policies (client_id, agent_id, insurer_id, premium, ia_levy, ec_levy, created_at) 
+                         VALUES (?,?,?,?,?,?,?)''', 
+                         (c_id, a_id, i_id, final_prem, final_ia, final_ec, datetime.now().strftime("%Y-%m-%d")))
+            conn.commit()
+            conn.close()
+            st.success(f"Saved: {c_name} successfully added to database.")
+            st.session_state.ai_data = {} # Reset AI data after save
+            st.rerun()
 
-    st.write(f"**Agent Payout:** ${f_a:,.2f} | **Company Profit:** ${f_c:,.2f}")
+with tab2:
+    st.subheader("Master Data Views")
+    sel_view = st.radio("Select Table", ["Clients", "Agents", "Insurers"], horizontal=True)
+    if sel_view == "Clients": st.dataframe(get_master_data("clients"), use_container_width=True)
+    elif sel_view == "Agents": st.dataframe(get_master_data("agents"), use_container_width=True)
+    else: st.dataframe(get_master_data("insurers"), use_container_width=True)
 
-    if st.button("💾 Save Record"):
-        conn = sqlite3.connect(DB_NAME)
-        conn.execute("INSERT OR REPLACE INTO clients VALUES (?,?,?)", (c_id, c_name, c_addr))
-        conn.execute("INSERT OR REPLACE INTO agents VALUES (?,?)", (a_id, a_name))
-        conn.execute("INSERT OR REPLACE INTO insurers VALUES (?,?)", (i_id, i_name))
-        conn.execute("INSERT INTO policies (client_id, agent_id, insurer_id, premium, ia_levy, ec_levy, agent_payout, co_profit, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                     (c_id, a_id, i_id, prem, ia, ec, f_a, f_c, datetime.now().strftime("%Y-%m-%d")))
-        conn.commit()
-        conn.close()
-        st.success("Saved!")
-        st.session_state.ai_data = {} # Reset for next one
-        st.rerun()
+with tab3:
+    st.subheader("Historical Policy Records")
+    conn = sqlite3.connect(DB_NAME)
+    df_history = pd.read_sql_query("SELECT * FROM policies", conn)
+    conn.close()
+    st.dataframe(df_history, use_container_width=True)
